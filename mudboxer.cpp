@@ -14,14 +14,15 @@
 #include "Crypt.h"
 #include "std_msgs/String.h"
 #include "geometry_msgs/Twist.h"
+#include "ros/subscription_queue.h"
+#include "ros/message_deserializer.h"
 
 #define AS_PORT 8000
 bool called_init = false;
 std::string source_name, node_name;
 Crypt myCrypt;
 SecureSock::Client client(&myCrypt);
-std::map<std::string, std::string> datatype;
-std::map<std::string, std::vector<int>> callbacks;
+std::map<std::string, std::vector<boost::shared_ptr<ros::SubscriptionCallbackHelper>>> real_helpers;
 
 void term_mudboxer();
 
@@ -53,33 +54,34 @@ void term_mudboxer() {
     printf("%s\n", "\nBYE!");
 }
 
-typedef std_msgs::String X;
-typedef std_msgs::StringConstPtr P;
+typedef std_msgs::String ROS_STR;
 
-void *my_create() {
-    return new geometry_msgs::Twist;
-}
 
 void mod_msg(const boost::function<ros::SerializedMessage(void)> &serfunc,
-             boost::function<ros::SerializedMessage(void)> &new_serfunc, X &new_msg) {
+             boost::function<ros::SerializedMessage(void)> &new_serfunc, ROS_STR &new_msg) {
     ros::SerializedMessage m2 = serfunc();
     new_msg.data.append(reinterpret_cast<char *>(m2.buf.get()), m2.num_bytes);
-    new_serfunc = boost::bind(ros::serialization::serializeMessage<X>, boost::ref(new_msg));
+    new_serfunc = boost::bind(ros::serialization::serializeMessage<ROS_STR>, boost::ref(new_msg));
 }
 
-void unmod_msg(const boost::shared_ptr<X const> &new_msg) {
-    geometry_msgs::Twist message;
-    auto colon_pos = new_msg->data.find_first_of(';');
-    auto topic = new_msg->data.substr(0, colon_pos);
-    auto ser_buf = new_msg->data.substr(colon_pos + 1);
-    auto len = ser_buf.length() - 4;
-    auto tmp = new uint8_t[len];
-    ser_buf.copy(reinterpret_cast<char *>(tmp), len, 4);
-    ros::serialization::IStream s(tmp, static_cast<uint32_t>(len));
-    ros::serialization::deserialize(s, message);
-    std::cout << topic << std::endl;
-    std::cout << message.linear.x << std::endl << message.linear.y << std::endl << message.linear.z << std::endl;
-    delete[] tmp;
+void unmod_msg(const boost::shared_ptr<ROS_STR const> &new_msg) {
+    std::string str = new_msg->data;
+    auto colon_pos = str.find_first_of(';');
+    auto topic = str.substr(0, colon_pos);
+    ros::SerializedMessage m;
+    m.num_bytes = new_msg->data.length() - colon_pos - 1;
+    m.buf.reset(new uint8_t[m.num_bytes]);
+    str.copy(reinterpret_cast<char *>(m.buf.get()), m.num_bytes, colon_pos + 1);
+    m.message_start = m.buf.get() + 4;
+    auto connection_header = boost::make_shared<ros::M_string>();
+    ros::SubscriptionCallbackHelperCallParams params;
+    for (auto &helper : real_helpers[topic]) {
+        auto des = boost::make_shared<ros::MessageDeserializer>(helper, m, connection_header);
+        ros::VoidConstPtr msg = des->deserialize();
+        params.event = ros::MessageEvent<void const>(msg, des->getConnectionHeader(), ros::Time::now(), false,
+                                                     ros::MessageEvent<void const>::CreateFunction());
+        helper->call(params);
+    }
 }
 
 void mod_pub_ops(ros::AdvertiseOptions &ops) {
@@ -89,24 +91,23 @@ void mod_pub_ops(ros::AdvertiseOptions &ops) {
     std::string key;
     client.read(key);
     myCrypt.save_aes_key(ops.topic, key);
-    datatype[ops.topic] = ops.datatype;
     auto topic = ops.topic;
     auto qs = ops.queue_size;
-    ops.template init<X>(topic, qs);
+    ops.template init<ROS_STR>(topic, qs);
 }
 
 
-void trans_callback(const boost::shared_ptr<X const> &str) {
+void trans_callback(const boost::shared_ptr<ROS_STR const> &str) {
     unmod_msg(str);
 }
 
 void mod_sub_ops(ros::SubscribeOptions &ops) {
-    datatype[ops.topic] = ops.datatype;
-    callbacks[ops.topic].push_back(1);
     auto topic = ops.topic;
+    if (topic[0] != '/') topic = '/' + topic;
+    real_helpers[topic].push_back(ops.helper);
     auto qs = ops.queue_size;
     ops.helper.reset();
-    ops.template init<X>(topic, qs, trans_callback);
+    ops.template init<ROS_STR>(topic, qs, trans_callback);
 }
 
 namespace ros {
@@ -126,7 +127,7 @@ namespace ros {
 
     void Publisher::publish(const boost::function<SerializedMessage(void)> &serfunc, SerializedMessage &m) const {
         boost::function<SerializedMessage(void)> new_serfunc;
-        X new_msg;
+        ROS_STR new_msg;
         new_msg.data = this->getTopic() + ';';
         mod_msg(serfunc, new_serfunc, new_msg);
         typedef void (*type)(const Publisher *, const boost::function<SerializedMessage(void)> &,
