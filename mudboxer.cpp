@@ -61,31 +61,25 @@ void *my_create() {
 }
 
 void mod_msg(const boost::function<ros::SerializedMessage(void)> &serfunc,
-             boost::function<ros::SerializedMessage(void)> &n_serfunc, X &ros_str) {
+             boost::function<ros::SerializedMessage(void)> &new_serfunc, X &new_msg) {
     ros::SerializedMessage m2 = serfunc();
-    std::string tmp(reinterpret_cast<char *>(m2.buf.get()), m2.num_bytes);
-    namespace ser = ros::serialization;
-    geometry_msgs::Twist my_value = *(geometry_msgs::Twist *) my_create();
-    auto serial_size = ros::serialization::serializationLength(my_value);
-    boost::shared_array<uint8_t> buffer(new uint8_t[serial_size]);
-    ser::OStream stream(buffer.get(), serial_size);
-    ser::serialize(stream, my_value);
-    ros_str.data.append(reinterpret_cast<char *>(buffer.get()), serial_size);
-    n_serfunc = boost::bind(ros::serialization::serializeMessage<X>, boost::ref(ros_str));
+    new_msg.data.append(reinterpret_cast<char *>(m2.buf.get()), m2.num_bytes);
+    new_serfunc = boost::bind(ros::serialization::serializeMessage<X>, boost::ref(new_msg));
 }
 
-void unmod_msg(const boost::shared_ptr<X const> &str) {
-    namespace ser = ros::serialization;
-
-    geometry_msgs::Twist my_value;
-    auto serial_size = ros::serialization::serializationLength(my_value);
-    boost::shared_array<uint8_t> buffer(new uint8_t[serial_size]);
-
-    str->data.copy(reinterpret_cast<char *>(buffer.get()), serial_size);
-
-    ser::IStream stream(buffer.get(), serial_size);
-    ser::deserialize(stream, my_value);
-    std::cout << my_value.linear.x << serial_size << std::endl;
+void unmod_msg(const boost::shared_ptr<X const> &new_msg) {
+    geometry_msgs::Twist message;
+    auto colon_pos = new_msg->data.find_first_of(';');
+    auto topic = new_msg->data.substr(0, colon_pos);
+    auto ser_buf = new_msg->data.substr(colon_pos + 1);
+    auto len = ser_buf.length() - 4;
+    auto tmp = new uint8_t[len];
+    ser_buf.copy(reinterpret_cast<char *>(tmp), len, 4);
+    ros::serialization::IStream s(tmp, static_cast<uint32_t>(len));
+    ros::serialization::deserialize(s, message);
+    std::cout << topic << std::endl;
+    std::cout << message.linear.x << std::endl << message.linear.y << std::endl << message.linear.z << std::endl;
+    delete[] tmp;
 }
 
 void mod_pub_ops(ros::AdvertiseOptions &ops) {
@@ -95,7 +89,6 @@ void mod_pub_ops(ros::AdvertiseOptions &ops) {
     std::string key;
     client.read(key);
     myCrypt.save_aes_key(ops.topic, key);
-
     datatype[ops.topic] = ops.datatype;
     auto topic = ops.topic;
     auto qs = ops.queue_size;
@@ -132,14 +125,15 @@ namespace ros {
     }
 
     void Publisher::publish(const boost::function<SerializedMessage(void)> &serfunc, SerializedMessage &m) const {
-        boost::function<SerializedMessage(void)> n_serfunc;
-        X tmp;
-        mod_msg(serfunc, n_serfunc, tmp);
+        boost::function<SerializedMessage(void)> new_serfunc;
+        X new_msg;
+        new_msg.data = this->getTopic() + ';';
+        mod_msg(serfunc, new_serfunc, new_msg);
         typedef void (*type)(const Publisher *, const boost::function<SerializedMessage(void)> &,
                              ros::SerializedMessage &);
         auto ptr = (type) dlsym(RTLD_NEXT,
                                 "_ZNK3ros9Publisher7publishERKN5boost8functionIFNS_17SerializedMessageEvEEERS3_");
-        return ptr(this, n_serfunc, m);
+        return ptr(this, new_serfunc, m);
     }
 
     Publisher NodeHandle::advertise(AdvertiseOptions &ops) {
