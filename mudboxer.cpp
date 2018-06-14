@@ -56,25 +56,36 @@ void term_mudboxer() {
 typedef std_msgs::String X;
 typedef std_msgs::StringConstPtr P;
 
+void *my_create() {
+    return new geometry_msgs::Twist;
+}
+
 void mod_msg(const boost::function<ros::SerializedMessage(void)> &serfunc,
              boost::function<ros::SerializedMessage(void)> &n_serfunc, X &ros_str) {
     ros::SerializedMessage m2 = serfunc();
-    std::string &msg = ros_str.data;
-    msg.append(std::to_string(m2.num_bytes));
-    msg.append(1, ';');
-    msg.append(reinterpret_cast<char *>(m2.buf.get()), m2.num_bytes);
+    std::string tmp(reinterpret_cast<char *>(m2.buf.get()), m2.num_bytes);
+    namespace ser = ros::serialization;
+    geometry_msgs::Twist my_value = *(geometry_msgs::Twist *) my_create();
+    auto serial_size = ros::serialization::serializationLength(my_value);
+    boost::shared_array<uint8_t> buffer(new uint8_t[serial_size]);
+    ser::OStream stream(buffer.get(), serial_size);
+    ser::serialize(stream, my_value);
+    ros_str.data.append(reinterpret_cast<char *>(buffer.get()), serial_size);
     n_serfunc = boost::bind(ros::serialization::serializeMessage<X>, boost::ref(ros_str));
-    std::cout << msg << std::endl;
 }
 
-void unmod_msg(const P &str, ros::SerializedMessage &m) {
-    const std::string msg = str->data;
-    std::cout << msg.length() << std::endl;
-    size_t colon_pos;
-//    auto num_bytes = static_cast<size_t>(std::stoi(msg, &colon_pos));
-//    m.num_bytes = num_bytes;
-//    m.buf = boost::shared_array<uint8_t>(new uint8_t[num_bytes]);
-//    msg.copy(reinterpret_cast<char *>(m.buf.get()), num_bytes, colon_pos + 1);
+void unmod_msg(const boost::shared_ptr<X const> &str) {
+    namespace ser = ros::serialization;
+
+    geometry_msgs::Twist my_value;
+    auto serial_size = ros::serialization::serializationLength(my_value);
+    boost::shared_array<uint8_t> buffer(new uint8_t[serial_size]);
+
+    str->data.copy(reinterpret_cast<char *>(buffer.get()), serial_size);
+
+    ser::IStream stream(buffer.get(), serial_size);
+    ser::deserialize(stream, my_value);
+    std::cout << my_value.linear.x << serial_size << std::endl;
 }
 
 void mod_pub_ops(ros::AdvertiseOptions &ops) {
@@ -84,24 +95,25 @@ void mod_pub_ops(ros::AdvertiseOptions &ops) {
     std::string key;
     client.read(key);
     myCrypt.save_aes_key(ops.topic, key);
-    ops.datatype = ros::message_traits::DataType<X>::value();
-    ops.md5sum = ros::message_traits::MD5Sum<X>::value();
-    ops.message_definition = ros::message_traits::definition<X>();
-    ops.has_header = ros::message_traits::hasHeader<X>();
+
     datatype[ops.topic] = ops.datatype;
+    auto topic = ops.topic;
+    auto qs = ops.queue_size;
+    ops.template init<X>(topic, qs);
 }
 
 
-void trans_callback(const P &str) {
-    std::cout << *str << std::endl;
-//    ros::SerializedMessage m;
-//    unmod_msg(str, m);
+void trans_callback(const boost::shared_ptr<X const> &str) {
+    unmod_msg(str);
 }
 
 void mod_sub_ops(ros::SubscribeOptions &ops) {
-    ops.template initByFullCallbackType<P>(ops.topic, ops.queue_size, trans_callback);
     datatype[ops.topic] = ops.datatype;
     callbacks[ops.topic].push_back(1);
+    auto topic = ops.topic;
+    auto qs = ops.queue_size;
+    ops.helper.reset();
+    ops.template init<X>(topic, qs, trans_callback);
 }
 
 namespace ros {
