@@ -1,0 +1,6 @@
+export ROSS_ROOT_CERT="Path to root CA's certificate"
+export ROSS_NODE_NAME="Node's name"
+export ROSS_NODE_KEY="Path to node's private key"
+export ROSS_NODE_PASS="Password to node's private key"
+export ROSS_NODE_CERT=""
+export ROSS_AS_HOST="URN of AuthServer"
