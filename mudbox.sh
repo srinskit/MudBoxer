@@ -1,1 +1,1 @@
-LD_PRELOAD=/home/srinag/Projects/MudBoxer/cmake-build-debug/libMudBoxer.so $@
+LD_PRELOAD=/usr/local/lib/libMudBoxer.so $@
