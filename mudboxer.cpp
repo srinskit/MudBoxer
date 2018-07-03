@@ -17,8 +17,8 @@
 typedef std_msgs::String ROS_STR;
 bool called_init = false, enc = true;
 std::string node_name;
-Crypt myCrypt;
-SecureSock::Client client(&myCrypt);
+Crypt cr;
+SecureSock::Client client(&cr);
 std::map<std::string, std::vector<boost::shared_ptr<ros::SubscriptionCallbackHelper>>> real_helpers;
 
 void term_mudboxer();
@@ -30,11 +30,12 @@ void init_mudboxer() {
     if (called_init) return;
     called_init = true;
     printf("\n%s\n", "--- MUDBOXER ---");
-    myCrypt.initialize("ROSS");
+    cr.initialize("ROSS");
     node_name = getenv("ROSS_NODE_NAME");
-    myCrypt.add_cert("root", getenv("ROSS_ROOT_CERT"));
-    myCrypt.load_private_key(getenv("ROSS_NODE_KEY"), getenv("ROSS_NODE_PASS"));
-    myCrypt.load_my_cert(getenv("ROSS_NODE_CERT"), "", true);
+    cr.add_cert("root", getenv("ROSS_ROOT_CERT"));
+    cr.add_cert("S1", "/home/srinag/Projects/SrinSkit_CA/inter/S1/S1.crt");
+    cr.load_my_key(getenv("ROSS_NODE_KEY"), getenv("ROSS_NODE_PASS"));
+    cr.load_my_cert(getenv("ROSS_NODE_CERT"), "S1", true);
     client.init();
     if (!client.connect("AuthServer", getenv("ROSS_AS_HOST"), AS_PORT, "root", true)) {
         printf("Could not connect to AuthServer :(\n");
@@ -52,7 +53,7 @@ void term_mudboxer() {
     called_init = false;
     client.close();
     client.terminate();
-    myCrypt.terminate();
+    cr.terminate();
     printf("%s\n", "\n---   BYE!   ---");
 }
 
@@ -64,43 +65,52 @@ typedef boost::function<ros::SerializedMessage(void)> SerFunc;
 void mod_msg(const SerFunc &ser_func, SerFunc &new_ser_func, ROS_STR &new_msg) {
     /*
      * Format of final message: topic;payload
-     * payload: encrypted serialized message buffer 'buf'
+     * payload: encrypted (serialized message buffer 'buf' + SHA256 checksum('buf'))
      * format of 'buf'(by ROS): size of 'buf'(4 bytes) + serialized message(num_bytes-4 bytes)
      * rev-engineered ref: ros/serialized_message.h, serializeMessage in ros/serialization.h,
      * Todo: add ref to source files so you don't forget why you did this
      */
     ros::SerializedMessage m2 = ser_func();
-    std::string payload(reinterpret_cast<char *>(m2.buf.get()), m2.num_bytes);
-    auto topic = new_msg.data.substr(0, new_msg.data.length() - 1);
+    std::string payload(rcc(m2.buf.get()), m2.num_bytes);
+    auto topic = new_msg.data;
     if (enc) {
-        std::string tmp;
-        myCrypt.aes_encrypt(payload, topic, tmp);
-        payload = tmp;
+        std::string checksum;
+        cr.checksum(payload, checksum);
+        cr.aes_encrypt(payload + checksum, topic, payload);
     }
+    new_msg.data.append(1, ';');
     new_msg.data.append(payload);
     new_ser_func = boost::bind(ros::serialization::serializeMessage<ROS_STR>, boost::ref(new_msg));
 }
 
 /*
  * Unwraps wrapped message received from wrapped ROS node
- * */
-void unmod_msg(const boost::shared_ptr<ROS_STR const> &new_msg, ros::SerializedMessage &m, std::string &topic) {
+ */
+bool unmod_msg(const boost::shared_ptr<ROS_STR const> &new_msg, ros::SerializedMessage &m, std::string &topic) {
     std::string str = new_msg->data;
     auto colon_pos = str.find_first_of(';');
+    if (colon_pos >= str.length()) return false;
     topic = str.substr(0, colon_pos);
+    std::string serial_msg;
     if (enc) {
-        std::string tmp;
-        myCrypt.aes_decrypt(str.substr(colon_pos + 1), topic, tmp);
-        str = topic + ';' + tmp;
+        std::string payload;
+        if (!cr.aes_decrypt(str.substr(colon_pos + 1), topic, payload)) return false;
+        serial_msg = payload.substr(0, payload.length() - cr.checksum_size());
+        auto checksum = payload.substr(payload.length() - cr.checksum_size());
+        if (!cr.verify_checksum(serial_msg, checksum))
+            return false;
+    } else {
+        serial_msg = new_msg->data.substr(colon_pos + 1);
     }
-    m.num_bytes = new_msg->data.length() - colon_pos - 1;
     /*
      * rev-engineer ref:
      * Todo: add ref to source files so you don't forget why you did this
      */
+    m.num_bytes = serial_msg.length();
     m.buf.reset(new uint8_t[m.num_bytes]);
-    str.copy(reinterpret_cast<char *>(m.buf.get()), m.num_bytes, colon_pos + 1);
+    serial_msg.copy(reinterpret_cast<char *>(m.buf.get()), m.num_bytes);
     m.message_start = m.buf.get() + 4;
+    return true;
 }
 
 /*
@@ -119,7 +129,10 @@ std::string standardize_topic(ros::NodeHandle *nh, const std::string &topic) {
 void deliver_msg(const boost::shared_ptr<ROS_STR const> &str) {
     ros::SerializedMessage m;
     std::string topic;
-    unmod_msg(str, m, topic);
+    if (!unmod_msg(str, m, topic)) {
+        printf("wrong msg\n");
+        return;
+    }
     /*
      * rev-engineer ref:
      * Todo: add ref to source files so you don't forget why you did this
@@ -147,7 +160,7 @@ bool mod_pub_ops(ros::NodeHandle *nh, ros::AdvertiseOptions &ops) {
     client.write(msg.str());
     std::string key;
     client.read(key);
-    myCrypt.aes_save_key(topic, key);
+    cr.aes_save_key(topic, key);
     auto qs = ops.queue_size;
     ops.template init<ROS_STR>(topic, qs);
 }
@@ -164,7 +177,7 @@ bool mod_sub_ops(ros::NodeHandle *nh, ros::SubscribeOptions &ops) {
     client.write(msg.str());
     std::string key;
     client.read(key);
-    myCrypt.aes_save_key(topic, key);
+    cr.aes_save_key(topic, key);
     real_helpers[topic].push_back(ops.helper);
     auto qs = ops.queue_size;
     ops.helper.reset();
@@ -208,7 +221,7 @@ namespace ros {
     void Publisher::publish(const boost::function<SerializedMessage(void)> &ser_func, SerializedMessage &m) const {
         boost::function<SerializedMessage(void)> new_ser_func;
         ROS_STR new_msg;
-        new_msg.data = this->getTopic() + ';';
+        new_msg.data = this->getTopic();
         mod_msg(ser_func, new_ser_func, new_msg);
         typedef void (*type)(const Publisher *, const boost::function<SerializedMessage(void)> &,
                              ros::SerializedMessage &);
