@@ -3,8 +3,8 @@ A security 'wrapper' for ROS developed as part of ROS Secure or ROSS project.
 
 MudBoxer secures your ROS app by:
 * Changing `type` of all topics to `std::msgs/String` so only the nodes know the datatype of messages sent/received.
-* Encrypt messages of each topic with a key known only to certified nodes publishing/subcribing to that topic.
-* Include a checksum within the encrypted message to ensure message intergrity. 
+* Encrypting messages of each topic with a key known only to certified nodes publishing/subcribing to that topic.
+* Including a checksum within the encrypted message to ensure message intergrity. 
 
 ## Install
 * Install [Crypt](https://github.com/srinskit/Crypt)
